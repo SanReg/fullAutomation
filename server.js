@@ -1,0 +1,402 @@
+require('dotenv').config();
+const express = require('express');
+const axios = require('axios');
+const mongoose = require('mongoose');
+const FormData = require('form-data');
+const app = express();
+const port = 3000;
+
+// Automation state
+let changeStream = null;
+let isAutomationRunning = false;
+
+app.use(express.json());
+app.use(express.static(__dirname));
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok', message: 'Server is running' });
+});
+
+// Button interface
+app.get('/button', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Automation Control</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                }
+                .container {
+                    text-align: center;
+                    background: white;
+                    padding: 40px;
+                    border-radius: 10px;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+                }
+                h1 { color: #333; margin-bottom: 20px; }
+                .status {
+                    padding: 15px;
+                    margin: 20px 0;
+                    border-radius: 5px;
+                    font-weight: bold;
+                    font-size: 18px;
+                }
+                .status.running { background: #d4edda; color: #155724; }
+                .status.stopped { background: #f8d7da; color: #721c24; }
+                button {
+                    padding: 15px 40px;
+                    font-size: 18px;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    transition: all 0.3s;
+                    margin: 10px;
+                }
+                .start-btn {
+                    background: #28a745;
+                    color: white;
+                }
+                .start-btn:hover { background: #218838; }
+                .stop-btn {
+                    background: #dc3545;
+                    color: white;
+                }
+                .stop-btn:hover { background: #c82333; }
+                button:disabled {
+                    opacity: 0.5;
+                    cursor: not-allowed;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Order Automation Control</h1>
+                <div id="status" class="status">Loading...</div>
+                <button id="startBtn" class="start-btn" onclick="startAutomation()">Start Listening</button>
+                <button id="stopBtn" class="stop-btn" onclick="stopAutomation()">Stop Listening</button>
+            </div>
+            <script>
+                async function updateStatus() {
+                    const res = await fetch('/automation/status');
+                    const data = await res.json();
+                    const statusDiv = document.getElementById('status');
+                    const startBtn = document.getElementById('startBtn');
+                    const stopBtn = document.getElementById('stopBtn');
+                    
+                    if (data.running) {
+                        statusDiv.textContent = 'Status: RUNNING';
+                        statusDiv.className = 'status running';
+                        startBtn.disabled = true;
+                        stopBtn.disabled = false;
+                    } else {
+                        statusDiv.textContent = 'Status: STOPPED';
+                        statusDiv.className = 'status stopped';
+                        startBtn.disabled = false;
+                        stopBtn.disabled = true;
+                    }
+                }
+                
+                async function startAutomation() {
+                    await fetch('/automation/start', { method: 'POST' });
+                    await updateStatus();
+                }
+                
+                async function stopAutomation() {
+                    await fetch('/automation/stop', { method: 'POST' });
+                    await updateStatus();
+                }
+                
+                updateStatus();
+                setInterval(updateStatus, 2000);
+            </script>
+        </body>
+        </html>
+    `);
+});
+
+// Automation control endpoints
+app.get('/automation/status', (req, res) => {
+    res.json({ running: isAutomationRunning });
+});
+
+app.post('/automation/start', (req, res) => {
+    if (!isAutomationRunning) {
+        startChangeStream();
+        res.json({ success: true, message: 'Automation started' });
+    } else {
+        res.json({ success: false, message: 'Automation already running' });
+    }
+});
+
+app.post('/automation/stop', (req, res) => {
+    if (isAutomationRunning) {
+        stopChangeStream();
+        res.json({ success: true, message: 'Automation stopped' });
+    } else {
+        res.json({ success: false, message: 'Automation already stopped' });
+    }
+});
+
+// MongoDB connection
+mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+    .then(() => {
+        console.log('Connected to MongoDB');
+        console.log('Visit http://localhost:3000/button to control automation');
+    })
+    .catch(err => console.error('MongoDB connection error:', err));
+
+const orderSchema = new mongoose.Schema({
+    fileName: String,
+    user: mongoose.Schema.Types.ObjectId,
+    userFile: {
+        url: String,
+        filename: String
+    },
+    status: { type: String, default: 'pending' },
+    failureReason: String,
+    adminFiles: {
+        aiReport: {
+            url: String
+        },
+        similarityReport: {
+            url: String
+        }
+    }
+}, { collection: 'orders' });
+
+const Order = mongoose.model('Order', orderSchema);
+
+const userSchema = new mongoose.Schema({
+    checks: { type: Number, default: 0 }
+}, { collection: 'users' });
+
+const User = mongoose.model('User', userSchema);
+async function getToken() {
+    try {
+        const response = await axios.get('https://raw.githubusercontent.com/SanReg/automation/main/token.txt');
+        const token = response.data.trim().replace(/\r?\n/g, '');
+        console.log('Token fetched successfully');
+        return token;
+    } catch (error) {
+        console.error('Error fetching token:', error.message);
+        throw error;
+    }
+}
+
+// Function to get cookie from GitHub
+async function getCookie() {
+    try {
+        const response = await axios.get('https://raw.githubusercontent.com/SanReg/automation/main/Cookie.txt');
+        const cookie = response.data.trim().replace(/\r?\n/g, '');
+        console.log('Cookie fetched successfully');
+        return cookie;
+    } catch (error) {
+        console.error('Error fetching cookie:', error.message);
+        throw error;
+    }
+}
+
+// Function to handle new order
+async function handleNewOrder(order) {
+    console.log('New order detected:', order);
+    
+    try {
+        // Get the authorization token
+        const token = await getToken();
+        
+        // Download the file from order.userFile.url
+        const fileResponse = await axios.get(order.userFile.url, { 
+            responseType: 'arraybuffer' 
+        });
+        
+        // Prepare form data
+        const fileName = order.userFile.filename || order.fileName || 'file';
+        const formData = new FormData();
+        formData.append('file', Buffer.from(fileResponse.data), fileName);
+        
+        // Post request to Supabase
+        const supabaseUrl = `https://uvibhxfykplnajxopihb.supabase.co/storage/v1/object/files/bfbaac84-216b-4955-aa9e-ea25f4563e15/${fileName}`;
+        
+        console.log('Posting to Supabase with token...');
+        const response = await axios.post(supabaseUrl, formData, {
+            headers: {
+                ...formData.getHeaders(),
+                'apikey': 'sb_publishable_gn-VTqpQoi1gbd7OicsF4g_LcHf0SXr',
+                'Authorization': token
+            }
+        });
+        
+        console.log('Supabase response:', response.data);
+        
+        // Extract key from Supabase response
+        const supabaseKey = response.data.Key || response.data.key || response.data.name || fileName;
+        const publicFileUrl = `https://uvibhxfykplnajxopihb.supabase.co/storage/v1/object/public/${supabaseKey}`;
+        
+        // Get cookie for ryne.ai request
+        const cookie = await getCookie();
+        
+        // Post request to ryne.ai/api/deep-check
+        console.log('Posting to Ryne.ai deep-check API...');
+        const ryneResponse = await axios.post('https://ryne.ai/api/deep-check', 
+            {
+                uid: 'bfbaac84-216b-4955-aa9e-ea25f4563e15',
+                fileUrl: publicFileUrl
+            },
+            {
+                headers: {
+                    'Cookie': cookie
+                }
+            }
+        );
+        
+        console.log('Ryne.ai response:', ryneResponse.data);
+        
+        // Get history_id from ryne.ai response
+        const historyId = ryneResponse.data.history_id || ryneResponse.data.historyId || ryneResponse.data.id;
+        
+        if (historyId) {
+            console.log('Starting polling for history_id:', historyId);
+            startPolling(historyId, token, order._id);
+        } else {
+            console.log('No history_id found in ryne.ai response');
+        }
+        
+        return ryneResponse.data;
+    } catch (error) {
+        console.error('Error handling order:', error.message);
+        if (error.response) {
+            console.error('Response data:', error.response.data);
+            console.error('Response status:', error.response.status);
+        }
+        // Mark order as failed on any error
+        try {
+            let reason = (error.response && error.response.data && error.response.data.error) || error.message;
+            
+            // Check for InvalidKey error (unicode characters in filename)
+            if (error.response && error.response.data && error.response.data.error === 'InvalidKey') {
+                reason = "Please make sure your filename is in full english and doesn't contain any unicode characters!";
+            }
+            
+            if (order && order._id) {
+                const updatedOrder = await Order.findByIdAndUpdate(order._id, { status: 'failed', failureReason: reason }, { new: true });
+                // Refund credit to user
+                if (updatedOrder && updatedOrder.user) {
+                    await User.findByIdAndUpdate(updatedOrder.user, { $inc: { checks: 1 } });
+                    console.log('Refunded 1 check to user:', updatedOrder.user);
+                }
+            }
+        } catch (updateErr) {
+            console.error('Failed to mark order as failed:', updateErr.message);
+        }
+    }
+}
+
+// Function to poll checks_history
+async function startPolling(historyId, token, orderId) {
+    const pollUrl = `https://uvibhxfykplnajxopihb.supabase.co/rest/v1/checks_history?id=eq.${historyId}`;
+    const pollIntervalMs = 60_000; // 1 minute
+    const maxWaitMs = 360_000; // 6 minutes, tweakable
+    const startedAt = Date.now();
+    let intervalId;
+
+    const finalizeOrder = async (update) => {
+        try {
+            const updatedOrder = await Order.findByIdAndUpdate(orderId, update, { new: true });
+            // Refund credit to user if order failed
+            if (update.status === 'failed' && updatedOrder && updatedOrder.user) {
+                await User.findByIdAndUpdate(updatedOrder.user, { $inc: { checks: 1 } });
+                console.log('Refunded 1 check to user:', updatedOrder.user);
+            }
+        } catch (err) {
+            console.error('Failed to update order:', err.message);
+        }
+    };
+
+    const poll = async () => {
+        const elapsed = Date.now() - startedAt;
+        if (elapsed > maxWaitMs) {
+            clearInterval(intervalId);
+            await finalizeOrder({ status: 'failed', failureReason: 'Failed to generate report, try again later!' });
+            console.log('Polling timed out, marked order as failed');
+            return;
+        }
+
+        try {
+            const response = await axios.get(pollUrl, {
+                headers: {
+                    'apikey': 'sb_publishable_gn-VTqpQoi1gbd7OicsF4g_LcHf0SXr',
+                    'Authorization': token
+                }
+            });
+            
+            console.log('Polling response:', response.data);
+
+            const first = Array.isArray(response.data) ? response.data[0] : response.data;
+            if (first && first.turnitin_status === 'done') {
+                clearInterval(intervalId);
+                await finalizeOrder({
+                    'adminFiles.aiReport.url': first.turnitin_report_url,
+                    'adminFiles.similarityReport.url': first.turnitin_similarity_report_url,
+                    status: 'completed'
+                });
+                console.log('Turnitin done, order updated and polling stopped');
+            }
+        } catch (error) {
+            console.error('Polling error:', error.message);
+            if (error.response) {
+                console.error('Polling response data:', error.response.data);
+            }
+        }
+    };
+    
+    // Poll immediately and then every 1 minute
+    poll();
+    intervalId = setInterval(poll, pollIntervalMs);
+}
+
+// Start change stream to listen for new orders
+function startChangeStream() {
+    if (isAutomationRunning) {
+        console.log('Change stream already running');
+        return;
+    }
+
+    changeStream = Order.watch([
+        { $match: { operationType: 'insert' } }
+    ]);
+
+    isAutomationRunning = true;
+    console.log('Listening for new orders in the orders collection...');
+
+    changeStream.on('change', async (change) => {
+        const newOrder = change.fullDocument;
+        await handleNewOrder(newOrder);
+    });
+
+    changeStream.on('error', (error) => {
+        console.error('Change stream error:', error);
+        isAutomationRunning = false;
+    });
+}
+
+function stopChangeStream() {
+    if (changeStream) {
+        changeStream.close();
+        changeStream = null;
+        isAutomationRunning = false;
+        console.log('Stopped listening for new orders');
+    }
+}
+
+app.listen(port, () => {
+    console.log(`Server running at http://localhost:${port}`);
+});
