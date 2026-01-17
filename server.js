@@ -304,7 +304,7 @@ async function handleNewOrder(order) {
 async function startPolling(historyId, token, orderId) {
     const pollUrl = `https://uvibhxfykplnajxopihb.supabase.co/rest/v1/checks_history?id=eq.${historyId}`;
     const pollIntervalMs = 60_000; // 1 minute
-    const maxWaitMs = 360_000; // 6 minutes, tweakable
+    const maxWaitMs = 600_000; // 6 minutes, tweakable
     const startedAt = Date.now();
     let intervalId;
 
