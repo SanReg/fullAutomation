@@ -3,8 +3,17 @@ const express = require('express');
 const axios = require('axios');
 const mongoose = require('mongoose');
 const FormData = require('form-data');
+const cloudinary = require('cloudinary').v2;
+const { PDFDocument } = require('pdf-lib');
 const app = express();
 const port = 3000;
+
+// Configure Cloudinary
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 // Automation state
 let changeStream = null;
@@ -199,6 +208,59 @@ async function refundCredit(userId, paymentSource) {
         console.error('Failed to refund credit:', err.message);
     }
 }
+
+// Function to remove first page from PDF and upload to Cloudinary
+async function processAndUploadPDF(pdfUrl, fileName) {
+    try {
+        console.log('Downloading PDF from:', pdfUrl);
+        // Download the PDF
+        const response = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
+        const pdfBytes = response.data;
+        
+        // Load the PDF
+        const pdfDoc = await PDFDocument.load(pdfBytes);
+        const totalPages = pdfDoc.getPageCount();
+        
+        console.log(`PDF has ${totalPages} pages, removing first page...`);
+        
+        // Create a new PDF without the first page
+        const newPdfDoc = await PDFDocument.create();
+        
+        // Copy all pages except the first one
+        for (let i = 1; i < totalPages; i++) {
+            const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [i]);
+            newPdfDoc.addPage(copiedPage);
+        }
+        
+        // Save the modified PDF
+        const modifiedPdfBytes = await newPdfDoc.save();
+        
+        // Upload to Cloudinary
+        console.log('Uploading modified PDF to Cloudinary...');
+        return new Promise((resolve, reject) => {
+            const uploadStream = cloudinary.uploader.upload_stream(
+                {
+                    resource_type: 'raw',
+                    public_id: `reports/${fileName}_${Date.now()}.pdf`,
+                    folder: 'homework_reports'
+                },
+                (error, result) => {
+                    if (error) {
+                        console.error('Cloudinary upload error:', error);
+                        reject(error);
+                    } else {
+                        console.log('Cloudinary upload successful:', result.secure_url);
+                        resolve(result.secure_url);
+                    }
+                }
+            );
+            uploadStream.end(Buffer.from(modifiedPdfBytes));
+        });
+    } catch (error) {
+        console.error('Error processing PDF:', error.message);
+        throw error;
+    }
+}
 async function getToken() {
     try {
         const response = await axios.get('https://raw.githubusercontent.com/SanReg/automation/main/token.txt');
@@ -360,12 +422,30 @@ async function startPolling(historyId, token, orderId) {
             const first = Array.isArray(response.data) ? response.data[0] : response.data;
             if (first && first.turnitin_status === 'done') {
                 clearInterval(intervalId);
-                await finalizeOrder({
-                    'adminFiles.aiReport.url': first.turnitin_report_url,
-                    'adminFiles.similarityReport.url': first.turnitin_similarity_report_url,
-                    status: 'completed'
-                });
-                console.log('Turnitin done, order updated and polling stopped');
+                
+                try {
+                    // Process both PDFs: remove first page and upload to Cloudinary
+                    console.log('Processing AI report PDF...');
+                    const aiReportUrl = await processAndUploadPDF(first.turnitin_report_url, 'ai_report');
+                    
+                    console.log('Processing similarity report PDF...');
+                    const similarityReportUrl = await processAndUploadPDF(first.turnitin_similarity_report_url, 'similarity_report');
+                    
+                    // Update order with Cloudinary URLs
+                    await finalizeOrder({
+                        'adminFiles.aiReport.url': aiReportUrl,
+                        'adminFiles.similarityReport.url': similarityReportUrl,
+                        status: 'completed'
+                    });
+                    console.log('PDFs processed, uploaded to Cloudinary, and order updated');
+                } catch (processError) {
+                    console.error('Error processing PDFs:', processError.message);
+                    // If processing fails, mark order as failed
+                    await finalizeOrder({
+                        status: 'failed',
+                        failureReason: 'Failed to process report PDFs'
+                    });
+                }
             }
         } catch (error) {
             console.error('Polling error:', error.message);
