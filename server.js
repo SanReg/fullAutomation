@@ -157,6 +157,7 @@ mongoose.connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTop
 const orderSchema = new mongoose.Schema({
     fileName: String,
     user: mongoose.Schema.Types.ObjectId,
+    paymentSource: { type: String, enum: ['regular', 'daily'] },
     userFile: {
         url: String,
         filename: String
@@ -176,10 +177,28 @@ const orderSchema = new mongoose.Schema({
 const Order = mongoose.model('Order', orderSchema);
 
 const userSchema = new mongoose.Schema({
-    checks: { type: Number, default: 0 }
+    checks: { type: Number, default: 0 },
+    unlimitedSettings: {
+        dailyCreditsUsedToday: { type: Number, default: 0 }
+    }
 }, { collection: 'users' });
 
 const User = mongoose.model('User', userSchema);
+
+// Function to refund credit based on payment source
+async function refundCredit(userId, paymentSource) {
+    try {
+        if (paymentSource === 'regular') {
+            await User.findByIdAndUpdate(userId, { $inc: { checks: 1 } });
+            console.log('Refunded 1 check to user:', userId);
+        } else if (paymentSource === 'daily') {
+            await User.findByIdAndUpdate(userId, { $dec: { 'unlimitedSettings.dailyCreditsUsedToday': 1 } });
+            console.log('Refunded 1 daily credit to user:', userId);
+        }
+    } catch (err) {
+        console.error('Failed to refund credit:', err.message);
+    }
+}
 async function getToken() {
     try {
         const response = await axios.get('https://raw.githubusercontent.com/SanReg/automation/main/token.txt');
@@ -290,8 +309,7 @@ async function handleNewOrder(order) {
                 const updatedOrder = await Order.findByIdAndUpdate(order._id, { status: 'failed', failureReason: reason }, { new: true });
                 // Refund credit to user
                 if (updatedOrder && updatedOrder.user) {
-                    await User.findByIdAndUpdate(updatedOrder.user, { $inc: { checks: 1 } });
-                    console.log('Refunded 1 check to user:', updatedOrder.user);
+                    await refundCredit(updatedOrder.user, updatedOrder.paymentSource);
                 }
             }
         } catch (updateErr) {
@@ -313,8 +331,7 @@ async function startPolling(historyId, token, orderId) {
             const updatedOrder = await Order.findByIdAndUpdate(orderId, update, { new: true });
             // Refund credit to user if order failed
             if (update.status === 'failed' && updatedOrder && updatedOrder.user) {
-                await User.findByIdAndUpdate(updatedOrder.user, { $inc: { checks: 1 } });
-                console.log('Refunded 1 check to user:', updatedOrder.user);
+                await refundCredit(updatedOrder.user, updatedOrder.paymentSource);
             }
         } catch (err) {
             console.error('Failed to update order:', err.message);
