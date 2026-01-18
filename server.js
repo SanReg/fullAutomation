@@ -192,7 +192,7 @@ async function refundCredit(userId, paymentSource) {
             await User.findByIdAndUpdate(userId, { $inc: { checks: 1 } });
             console.log('Refunded 1 check to user:', userId);
         } else if (paymentSource === 'daily') {
-            await User.findByIdAndUpdate(userId, { $dec: { 'unlimitedSettings.dailyCreditsUsedToday': 1 } });
+            await User.findByIdAndUpdate(userId, { $inc: { 'unlimitedSettings.dailyCreditsUsedToday': -1 } });
             console.log('Refunded 1 daily credit to user:', userId);
         }
     } catch (err) {
